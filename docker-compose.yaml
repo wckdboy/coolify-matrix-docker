@@ -16,6 +16,9 @@ services:
       POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
       ADMIN_USER: ${SERVICE_LOWERCASEUSER_ADMIN}
       ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
+      # Required for `register_new_matrix_user` (initial admin + Ketesa).
+      # Synapse's generated config omits it; the entrypoint writes it in.
+      SYNAPSE_REGISTRATION_SHARED_SECRET: ${SERVICE_BASE64_64_REGISTRATION}
     volumes:
       - synapse-data:/data
       - ./scripts/synapse-entrypoint.sh:/synapse-entrypoint.sh:ro
