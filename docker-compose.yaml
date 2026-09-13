@@ -1,0 +1,144 @@
+name: matrix
+
+services:
+  synapse:
+    image: matrixdotorg/synapse:v1.160.0
+    restart: unless-stopped
+    init: true
+    environment:
+      SERVICE_URL_SYNAPSE_8008:
+      SYNAPSE_SERVER_NAME: ${SYNAPSE_SERVER_NAME:?Set the permanent Matrix server name}
+      SYNAPSE_REPORT_STATS: ${SYNAPSE_REPORT_STATS:-no}
+      ENABLE_REGISTRATION: ${ENABLE_REGISTRATION:-false}
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-50M}
+      POSTGRES_DB: ${POSTGRES_DB:-synapse}
+      POSTGRES_USER: ${SERVICE_LOWERCASEUSER_POSTGRES}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
+      ADMIN_USER: ${SERVICE_LOWERCASEUSER_ADMIN}
+      ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
+    volumes:
+      - synapse-data:/data
+      - ./scripts/synapse-entrypoint.sh:/synapse-entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/synapse-entrypoint.sh"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8008/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+
+  element:
+    image: vectorim/element-web:v1.12.27
+    restart: unless-stopped
+    init: true
+    environment:
+      SERVICE_URL_ELEMENT_80:
+      SERVICE_URL_SYNAPSE_8008:
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cat > /app/config.json <<EOF
+        {
+          "default_server_config": {
+            "m.homeserver": {
+              "base_url": "$${SERVICE_URL_SYNAPSE_8008}"
+            }
+          },
+          "disable_custom_urls": true,
+          "disable_guests": true,
+          "disable_3pid_login": true,
+          "brand": "Element",
+          "default_theme": "dark",
+          "room_directory": {
+            "servers": ["matrix.org"]
+          },
+          "setting_defaults": {
+            "UIFeature.registration": false
+          }
+        }
+        EOF
+        exec nginx -g 'daemon off;'
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=1m
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      synapse:
+        condition: service_healthy
+    networks:
+      - frontend
+
+  ketesa:
+    image: ghcr.io/etkecc/ketesa:v1.5.0
+    restart: unless-stopped
+    init: true
+    environment:
+      SERVICE_URL_KETESA_80:
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      synapse:
+        condition: service_healthy
+    networks:
+      - frontend
+
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    shm_size: 256mb
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-synapse}
+      POSTGRES_USER: ${SERVICE_LOWERCASEUSER_POSTGRES}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /run/postgresql:rw,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - backend
+
+volumes:
+  synapse-data:
+  postgres-data:
+
+networks:
+  frontend:
+  backend:
+    internal: true
