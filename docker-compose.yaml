@@ -7,7 +7,8 @@ name: matrix
 # * Set SYNAPSE_SERVER_NAME BEFORE the first deploy: it is baked into every
 #   Matrix ID and cannot be changed afterwards.
 # * Assign the domains BEFORE the first deploy so the generated SERVICE_URL
-#   values are correct: synapse:8008, element:80, ketesa:80.
+#   values are correct: synapse:8008, element:80, ketesa:8080, wellknown:80
+#   (wellknown gets the SERVER-NAME apex domain, e.g. doom.moe).
 # * No custom Docker networks are defined. Services share Coolify's network, so
 #   its proxy can route to them; nothing is published except the declared
 #   domains, and PostgreSQL has no ports at all (unreachable from outside).
@@ -72,7 +73,12 @@ services:
 
         config.update({
             "public_baseurl": public_url,
-            "serve_server_wellknown": True,
+            # Off on purpose: Synapse serves /.well-known/matrix/server on ITS OWN
+            # host and would advertise "<server_name>:443" - i.e. the apex, which
+            # serves only the static delegation files, not the federation API. The
+            # delegation therefore lives on the apex (see the wellknown service),
+            # which is where federating servers actually look it up.
+            "serve_server_wellknown": False,
             "database": {
                 "name": "psycopg2",
                 "args": {
@@ -249,6 +255,93 @@ services:
     depends_on:
       synapse:
         condition: service_started
+
+  # Serves the Matrix delegation files on the SERVER NAME's host (the apex), which is
+  # where other servers look first:
+  #   https://<server_name>/.well-known/matrix/server -> {"m.server":"matrix.example.com:443"}
+  #   https://<server_name>/.well-known/matrix/client -> {"m.homeserver":{"base_url":...}}
+  # Assign THIS service the apex domain in Coolify (e.g. doom.moe). Without it a
+  # federating server gets an error, falls back to an SRV record (none), then to
+  # <server_name>:8448 (nothing published) and federation dead-ends.
+  # The client file lets users log in from any client by typing just "doom.moe".
+  wellknown:
+    image: nginx:alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      - SERVICE_URL_WELLKNOWN_80
+      - SYNAPSE_PUBLIC_URL=${SYNAPSE_PUBLIC_URL:?Set the public HTTPS URL of Synapse, e.g. https://matrix.example.com}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${SYNAPSE_PUBLIC_URL}" ]; then
+          echo "SYNAPSE_PUBLIC_URL is empty - set it in Coolify and redeploy" >&2
+          exit 1
+        fi
+        # The delegate needs an EXPLICIT port: a bare hostname makes the requesting
+        # server look up an SRV record and then fall back to port 8448, which this
+        # stack does not publish. "<host>:443" is what actually works.
+        delegate="$${SYNAPSE_PUBLIC_URL#*://}"
+        delegate="$${delegate%%/*}"
+        case "$$delegate" in
+          *:*) ;;
+          *) delegate="$$delegate:443" ;;
+        esac
+        mkdir -p /usr/share/nginx/html/.well-known/matrix
+        cat > /usr/share/nginx/html/.well-known/matrix/server <<EOF
+        {"m.server":"$${delegate}"}
+        EOF
+        cat > /usr/share/nginx/html/.well-known/matrix/client <<EOF
+        {"m.homeserver":{"base_url":"$${SYNAPSE_PUBLIC_URL}"}}
+        EOF
+        # Placeholder landing page; replace it to host real content at the apex.
+        cat > /usr/share/nginx/html/index.html <<EOF
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>doom.moe</title>
+        <p>Matrix homeserver: <a href="$${SYNAPSE_PUBLIC_URL}">$${SYNAPSE_PUBLIC_URL}</a></p>
+        EOF
+        # These files have no extension, so nginx would serve them as
+        # application/octet-stream; give them the right type, plus CORS on the client
+        # file so browser-based clients may read it.
+        cat > /etc/nginx/conf.d/default.conf <<EOF
+        server {
+            listen 80;
+            server_name _;
+            root /usr/share/nginx/html;
+            location = /.well-known/matrix/server {
+                default_type application/json;
+            }
+            location = /.well-known/matrix/client {
+                default_type application/json;
+                add_header Access-Control-Allow-Origin "*" always;
+            }
+        }
+        EOF
+        # Hand over to the image entrypoint: its hooks only run when the first
+        # argument is `nginx`, and they are what starts nginx the normal way.
+        exec /docker-entrypoint.sh nginx -g "daemon off;"
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=1m
+      - /tmp:rw,noexec,nosuid,size=8m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/.well-known/matrix/server"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   postgres:
     # Floating within major 17 on purpose: a major version jump against an

@@ -32,17 +32,24 @@ baked into Synapse's config and Element's browser config at deploy time.
 3. **Assign the domains** (Configuration → General → component cards, or *Domains*):
    - `synapse:8008` → `https://matrix.example.com`
    - `element:80` → `https://chat.example.com`
-   - `ketesa:80` → `https://matrix-admin.example.com`
+   - `ketesa:8080` → `https://matrix-admin.example.com`
+   - `wellknown:80` → `https://example.com` — **the apex, i.e. the `SYNAPSE_SERVER_NAME`
+     itself, not a subdomain.** This is the domain other servers look up for federation.
    Coolify issues the certificates. **Assigning these generates the `SERVICE_URL` values
    the stack uses**, so do it before deploying — otherwise Element is built pointing at an
    internal address your browser cannot reach.
+   If the apex is currently assigned to another resource (an old website, a stopped app),
+   remove it from there first: a domain can only route to one service, and leaving it on a
+   dead resource makes `https://example.com/.well-known/matrix/server` answer
+   `503 no available server`, which is what breaks federation.
 4. **Deploy.** Watch the service logs. Expected sequence in the Synapse container:
    `Generating synapse config file` → `Reading registration_shared_secret from /data/...` →
    `[entrypoint] initial admin '<user>' created` → Synapse starts.
 5. **Verify.**
    ```
    curl -fsS https://matrix.example.com/health                                  # {}
-   curl -fsS https://matrix.example.com/.well-known/matrix/server               # {"m.server":"matrix.example.com:443"}
+   curl -fsS https://example.com/.well-known/matrix/server                      # {"m.server":"matrix.example.com:443"}
+   curl -fsS https://example.com/.well-known/matrix/client                      # {"m.homeserver":{"base_url":"https://matrix.example.com"}}
    curl -fsS -o /dev/null -w '%{http_code}\n' https://chat.example.com          # 200
    curl -fsS -o /dev/null -w '%{http_code}\n' https://matrix-admin.example.com  # 200
    ```
@@ -61,6 +68,8 @@ baked into Synapse's config and Element's browser config at deploy time.
 | `PermissionError: [Errno 13] Permission denied: '/data/<server>.log.config'` (Synapse exits during initialisation) | The entrypoint created the config as **root** with a restrictive umask, then Synapse's image dropped privileges to the `synapse` user (991:991), which could not read root-owned `0600` files | Fixed in this revision: `umask 022` and an explicit `chown -R 991:991 /data` + `chmod -R a+rX /data` before the server starts (also repairs root-owned leftovers from earlier failed deploys) |
 | Element loads but uses the wrong/default homeserver, or the client cannot connect | Element Web serves its runtime config from **`/tmp/element-web-config/config.json`** (`location /config { root /tmp/element-web-config; }`), and the image's entrypoint copies `/app/config*.json` there *before* the container command runs. A config written to `/app` at startup is therefore never served | Fixed: the command writes `/tmp/element-web-config/config.json` (writable by the image's `nginx` user, so no root needed). Do not write to `/app` for this |
 | Ketesa returns 502 / the domain never loads | The image serves on **8080** (`SERVER_PORT=8080`, and its own healthcheck probes `localhost:8080/health`), while the domain was routed to port 80 | Fixed: the service declares `SERVICE_URL_KETESA_8080`, which makes Coolify route the domain to 8080 |
+| Federation tester reports `No SRV records found` and then a connection to `<server name>:8448` that is refused | The apex `/.well-known/matrix/server` request failed, so discovery fell through to SRV (none) and then port 8448 (not published) | Assign the apex domain to the `wellknown:80` component — it serves the delegation file. Optionally also add the `_matrix-fed._tcp` SRV record |
+| `https://<apex>/.well-known/matrix/server` answers `503 no available server` | The apex domain is assigned in Coolify to a resource with no running container; a domain routes to only one service | Move the apex domain onto the `wellknown` service (and check the failing resource, e.g. an old website) |
 | `pull access denied` / `manifest unknown` | The host could not pull an image | Confirm the pinned tags are reachable from the server (`docker pull ghcr.io/etkecc/ketesa:v1.5.0` on the host) |
 | `error while creating mount source path .../scripts/...` | Older revision mounted a repo file that Coolify's deploy directory did not contain | Not possible in this revision: the Synapse entrypoint is inline in the Compose file |
 | Containers run but the domains 502 / never get certificates | Custom Docker networks stopped Coolify's proxy from reaching the containers | Not possible in this revision: no custom networks are defined; every service joins Coolify's network and only the declared domains are exposed |
@@ -81,27 +90,56 @@ volume and are never rotated by a redeploy.
 
 ## Federation
 
-If `SYNAPSE_SERVER_NAME` equals the hostname assigned to Synapse, federation works over
-HTTPS/443 through Synapse's generated `/.well-known/matrix/server` response.
+Federation is **discovery first**: a server looking for `@you:example.com` does not guess, it
+asks `example.com` where to connect. In spec order it tries
 
-If you want IDs like `@user:example.com` while Synapse is hosted at `matrix.example.com`,
-set `SYNAPSE_SERVER_NAME=example.com` on the **first** deployment and serve these files from
-the root domain:
+1. `https://<server name>/.well-known/matrix/server` — in this stack that is the **apex**,
+   served by the `wellknown` service,
+2. an SRV record `_matrix-fed._tcp.<server name>` if that request errors,
+3. otherwise `<server name>:8448`, which this stack deliberately does not publish.
 
-`https://example.com/.well-known/matrix/server`
+So with the apex unassigned (or assigned to a stopped resource) every path dead-ends: the
+well-known request 503s, no SRV record exists, and 8448 refuses the connection. The server
+itself can be perfectly healthy throughout — the tester's report is about *discovery*, not
+about Synapse.
+
+The `wellknown` service serves both files from the apex, generated at startup from
+`SYNAPSE_PUBLIC_URL`:
 
 ```json
 {"m.server":"matrix.example.com:443"}
 ```
-
-`https://example.com/.well-known/matrix/client`
-
 ```json
 {"m.homeserver":{"base_url":"https://matrix.example.com"}}
 ```
 
-The client response must include `Access-Control-Allow-Origin: *`. Test with the Matrix
-Federation Tester after deployment.
+Two details that matter and are easy to get wrong:
+
+- **`m.server` must carry an explicit port.** A bare hostname makes the requesting server do
+  an SRV lookup and then fall back to port 8448; `matrix.example.com:443` is what works here.
+- **The client file needs `Access-Control-Allow-Origin: *`** (browsers refuse it otherwise)
+  and both files should be served as `application/json` — they have no file extension, so
+  nginx would otherwise send `application/octet-stream`. The service config handles both.
+
+Synapse's own `serve_server_wellknown` is switched **off**: it answers on Synapse's own host
+and would advertise `<server name>:443` — i.e. the apex, which serves the delegation files and
+not the federation API. Delegation belongs on the apex, where it is looked up.
+
+**Optional belt and braces:** an SRV record removes the single point of failure of the apex
+response. Per spec `.well-known` is preferred, but if the apex request ever errors, this keeps
+federation alive:
+
+```
+_matrix-fed._tcp.example.com. 3600 IN SRV 10 0 443 matrix.example.com.
+```
+
+(`_matrix._tcp` is the deprecated spelling of the same thing; `_matrix-fed` is the IANA one.)
+
+**Verify federation** with the Matrix Federation Tester against **`example.com`** (the server
+name). Testing `matrix.example.com` instead reports a failure even when everything is correct —
+that hostname is not the server name and its `.well-known` is intentionally not authoritative.
+A passing report shows the resolved version, the key response for `example.com`, no errors,
+and the resource list as `valid`.
 
 ## Security and operations
 
@@ -130,6 +168,24 @@ Federation Tester after deployment.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (federation delegation: the `wellknown` service)**
+
+- Federation was unreachable while Synapse itself was healthy. Probing the live domain showed
+  why: the server name (`doom.moe`) had no working discovery at all — `/.well-known/matrix/server`
+  on the apex answered `503 no available server`, no `_matrix-fed._tcp` SRV record existed, and
+  `doom.moe:8448` is not published. Synapse's own `/.well-known/matrix/server` was answering
+  `{"m.server":"doom.moe:443"}`, advertising the apex, which does not serve the federation API.
+- Added the `wellknown` service (nginx, static): it generates
+  `/.well-known/matrix/server` (`m.server` = `SYNAPSE_PUBLIC_URL` host with an explicit `:443`)
+  and `/.well-known/matrix/client` at startup, serves both as `application/json`, adds CORS to
+  the client file, and drops all capabilities except the minimum nginx needs. Its healthcheck
+  probes the delegation file itself.
+- Synapse's `serve_server_wellknown` is now **off** — with the apex serving the real delegation,
+  Synapse's own copy was only ever a misleading answer.
+- Documented the deploy step (assign the apex to `wellknown:80`), the spec's discovery order,
+  the SRV alternative, and the trap that testing `matrix.<domain>` in the federation tester
+  reports a failure even when federation is correct.
 
 **2026-09-14 (Element: the container command must hand over to the image entrypoint)**
 
