@@ -22,6 +22,9 @@ baked into Synapse's config and Element's browser config at deploy time.
      `@user:example.com` with Synapse at `matrix.example.com`, set `example.com` and serve
      the `.well-known` files (see Federation below). For the simple case, set it to the
      same hostname you assign to Synapse in step 3.
+   - `SYNAPSE_PUBLIC_URL` — **required**. The public HTTPS URL of Synapse, e.g.
+     `https://matrix.example.com`. This is what Synapse advertises and what Element points
+     at. It must be an absolute URL with the scheme and no trailing slash.
    - `SYNAPSE_REPORT_STATS` — `no` (default)
    - `ENABLE_REGISTRATION` — `false` (default)
    - `MAX_UPLOAD_SIZE` — `50M` (default)
@@ -51,10 +54,11 @@ baked into Synapse's config and Element's browser config at deploy time.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Coolify refuses to deploy: "required variable is empty" | `SYNAPSE_SERVER_NAME` not set | Set it (step 2). Coolify blocks deploys while a `:?` variable is empty — this is by design |
+| `warning: The "SERVICE_URL_SYNAPSE_8008" variable is not set. Defaulting to a blank string.` | A cross-service reference to a Coolify URL/FQDN variable. Coolify populates `SERVICE_URL_*` / `SERVICE_FQDN_*` **only in the service that declares them**; password and username variables are global, URLs are not | Fixed in this revision: nothing references another service's URL variable. The public URL is passed as the plain `SYNAPSE_PUBLIC_URL` setting instead |
+| Coolify refuses to deploy: "required variable is empty" | `SYNAPSE_SERVER_NAME` or `SYNAPSE_PUBLIC_URL` not set | Set both (step 2). Coolify blocks deploys while a `:?` variable is empty — this is by design |
 | `error while creating mount source path .../scripts/...` | Older revision mounted a repo file that Coolify's deploy directory did not contain | Not possible in this revision: the Synapse entrypoint is inline in the Compose file |
 | Containers run but the domains 502 / never get certificates | Custom Docker networks stopped Coolify's proxy from reaching the containers | Not possible in this revision: no custom networks are defined; every service joins Coolify's network and only the declared domains are exposed |
-| Element loads but says "can't connect to homeserver" | `base_url` is an internal address (`http://synapse:8008`) because no domain was assigned to `synapse:8008` | Assign the domain, then restart Element (it rewrites `config.json` on every start) |
+| Element loads but says "can't connect to homeserver" | `base_url` is wrong or empty | `SYNAPSE_PUBLIC_URL` must be the public HTTPS URL with the scheme, e.g. `https://matrix.example.com`; if it is empty Element exits at start and says so |
 | No admin account, Ketesa login fails | Registration failed while Synapse was still starting | Check the Synapse logs for `[entrypoint] WARNING: admin creation failed` — the reason is printed now instead of being swallowed |
 | Uploads fail with 413 despite `MAX_UPLOAD_SIZE` | The reverse proxy has its own body-size limit | Raise the proxy limit in Coolify to match |
 
@@ -110,6 +114,18 @@ Federation Tester after deployment.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (deploy warning fix)**
+
+- Removed the last cross-service reference to a Coolify URL variable. Element's environment
+  interpolated `${SERVICE_URL_SYNAPSE_8008}` while only Synapse declares it, so Coolify
+  produced `The "SERVICE_URL_SYNAPSE_8008" variable is not set. Defaulting to a blank string.`
+  and Element would have been configured with an empty homeserver URL. URL/FQDN variables are
+  scoped to the declaring service (password and username variables are not).
+- Added a required `SYNAPSE_PUBLIC_URL` setting: the public HTTPS URL of Synapse, used by both
+  Synapse (`public_baseurl`) and Element (`base_url`). Deployment is blocked while it is empty,
+  so a blank URL can no longer reach a running container.
+- Element now fails fast with an explicit message if that value is empty.
 
 **2026-09-13 (review + fixes)**
 

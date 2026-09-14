@@ -22,6 +22,7 @@ services:
     environment:
       - SERVICE_URL_SYNAPSE_8008
       - SYNAPSE_SERVER_NAME=${SYNAPSE_SERVER_NAME:?Set the permanent Matrix server name}
+      - SYNAPSE_PUBLIC_URL=${SYNAPSE_PUBLIC_URL:?Set the public HTTPS URL of Synapse, e.g. https://matrix.example.com}
       - SYNAPSE_REPORT_STATS=${SYNAPSE_REPORT_STATS:-no}
       - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-false}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-50M}
@@ -55,7 +56,8 @@ services:
         path = Path("/data/homeserver.yaml")
         config = yaml.safe_load(path.read_text())
 
-        public_url = (os.environ.get("SERVICE_URL_SYNAPSE")
+        public_url = (os.environ.get("SYNAPSE_PUBLIC_URL")
+                      or os.environ.get("SERVICE_URL_SYNAPSE")
                       or os.environ.get("SERVICE_URL_SYNAPSE_8008", "")).rstrip("/") + "/"
         registration_enabled = os.getenv("ENABLE_REGISTRATION", "false").lower() == "true"
 
@@ -141,20 +143,25 @@ services:
     init: true
     environment:
       - SERVICE_URL_ELEMENT_80
-      # Primary value is the public Synapse URL; the fallback covers the case
-      # where only the port-suffixed variable is generated. Resolved at runtime
-      # inside the container, so a wrong/empty value cannot be baked in.
-      - SYNAPSE_URL_PRIMARY=${SERVICE_URL_SYNAPSE}
-      - SYNAPSE_URL_FALLBACK=${SERVICE_URL_SYNAPSE_8008}
+      # The public Synapse URL, passed straight through. Deliberately NOT a
+      # SERVICE_URL_* cross-reference: Coolify populates those only in the
+      # declaring service's context, so referencing one from another service
+      # resolves to a blank string at parse time (seen as:
+      #   "The SERVICE_URL_SYNAPSE_8008 variable is not set. Defaulting to a blank string.").
+      - SYNAPSE_PUBLIC_URL=${SYNAPSE_PUBLIC_URL:?Set the public HTTPS URL of Synapse, e.g. https://matrix.example.com}
     command:
       - /bin/sh
       - -ec
       - |
+        if [ -z "$${SYNAPSE_PUBLIC_URL}" ]; then
+          echo "SYNAPSE_PUBLIC_URL is empty - set it in Coolify and redeploy" >&2
+          exit 1
+        fi
         cat > /app/config.json <<EOF
         {
           "default_server_config": {
             "m.homeserver": {
-              "base_url": "$${SYNAPSE_URL_PRIMARY:-$${SYNAPSE_URL_FALLBACK}}"
+              "base_url": "$${SYNAPSE_PUBLIC_URL}"
             }
           },
           "disable_custom_urls": true,
