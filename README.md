@@ -59,7 +59,8 @@ baked into Synapse's config and Element's browser config at deploy time.
 | `required variable SYNAPSE_PUBLIC_URL is missing a value` (exit 1) | The variable is required and not set in Coolify | Add `SYNAPSE_PUBLIC_URL=https://matrix.yourdomain.com` under Environment Variables and redeploy |
 | `dependency failed to start: container ... is unhealthy` | A container's healthcheck failed while `up -d` waited on it. First boot runs DB migrations, which can exceed a short healthcheck window | Fixed in this revision: Synapse gets `start_period: 180s` / `retries: 20`, and Element + Ketesa wait for `service_started` instead of `service_healthy` |
 | `PermissionError: [Errno 13] Permission denied: '/data/<server>.log.config'` (Synapse exits during initialisation) | The entrypoint created the config as **root** with a restrictive umask, then Synapse's image dropped privileges to the `synapse` user (991:991), which could not read root-owned `0600` files | Fixed in this revision: `umask 022` and an explicit `chown -R 991:991 /data` + `chmod -R a+rX /data` before the server starts (also repairs root-owned leftovers from earlier failed deploys) |
-| `/bin/sh: can't create /app/config.json: Permission denied` (Element) | The element-web image runs as `USER nginx` with a root-owned `/app`, so it cannot write its own config | Fixed in this revision: the Element container runs as `0:0` so the config can be generated at startup (nginx's master drops worker processes to `nginx` itself). Alternative: mount a read-only `config.json` at `/app/config.json` and remove `user: "0:0"` |
+| Element loads but uses the wrong/default homeserver, or the client cannot connect | Element Web serves its runtime config from **`/tmp/element-web-config/config.json`** (`location /config { root /tmp/element-web-config; }`), and the image's entrypoint copies `/app/config*.json` there *before* the container command runs. A config written to `/app` at startup is therefore never served | Fixed: the command writes `/tmp/element-web-config/config.json` (writable by the image's `nginx` user, so no root needed). Do not write to `/app` for this |
+| Ketesa returns 502 / the domain never loads | The image serves on **8080** (`SERVER_PORT=8080`, and its own healthcheck probes `localhost:8080/health`), while the domain was routed to port 80 | Fixed: the service declares `SERVICE_URL_KETESA_8080`, which makes Coolify route the domain to 8080 |
 | `pull access denied` / `manifest unknown` | The host could not pull an image | Confirm the pinned tags are reachable from the server (`docker pull ghcr.io/etkecc/ketesa:v1.5.0` on the host) |
 | `error while creating mount source path .../scripts/...` | Older revision mounted a repo file that Coolify's deploy directory did not contain | Not possible in this revision: the Synapse entrypoint is inline in the Compose file |
 | Containers run but the domains 502 / never get certificates | Custom Docker networks stopped Coolify's proxy from reaching the containers | Not possible in this revision: no custom networks are defined; every service joins Coolify's network and only the declared domains are exposed |
@@ -129,6 +130,21 @@ Federation Tester after deployment.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (Element config path + Ketesa port — both found in the images, not guessed)**
+
+- **Element**: its nginx template serves the runtime config from
+  `/tmp/element-web-config/config.json`, not `/app/config.json`. The image's own entrypoint
+  copies `/app/config*.json` into that directory *before* the container command runs, so the
+  config written to `/app` was never served and the browser loaded the bundled sample config —
+  the app was up but pointed at the wrong homeserver. The command now writes the served path.
+  This also removed the need for the earlier `user: "0:0"` workaround: `/tmp` is writable by the
+  image's `nginx` user, so the container runs unprivileged again.
+- **Ketesa**: the image listens on **8080** (`SERVER_PORT=8080`; its own healthcheck probes
+  `localhost:8080/health`), but the domain was declared against port 80, so the proxy had
+  nothing to reach. The service now declares `SERVICE_URL_KETESA_8080`.
+- Both facts came from inspecting the pinned images (config blobs, layers, nginx template,
+  shipped healthchecks) rather than from documentation.
 
 **2026-09-14 (floating image tags)**
 

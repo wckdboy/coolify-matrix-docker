@@ -161,12 +161,6 @@ services:
     image: vectorim/element-web:latest
     restart: unless-stopped
     init: true
-    # The element-web image runs as USER nginx with a root-owned /app, so its own
-    # command cannot write /app/config.json ("can't create /app/config.json:
-    # Permission denied"). Running as root lets us generate the config at startup;
-    # nginx's master then drops the worker processes to the nginx user itself.
-    # (Alternative: mount a read-only config.json at /app/config.json and drop this.)
-    user: "0:0"
     environment:
       - SERVICE_URL_ELEMENT_80
       # The public Synapse URL, passed straight through. Deliberately NOT a
@@ -183,7 +177,13 @@ services:
           echo "SYNAPSE_PUBLIC_URL is empty - set it in Coolify and redeploy" >&2
           exit 1
         fi
-        cat > /app/config.json <<EOF
+        # Element Web serves its runtime config from /tmp/element-web-config/config.json
+        # (nginx: `location /config { root /tmp/element-web-config; }`). The image's own
+        # entrypoint copies /app/config*.json there before this command runs, so a config
+        # written to /app at this point is never served - the client would load the
+        # bundled sample config. /tmp is writable by the image's nginx user, so no root.
+        mkdir -p /tmp/element-web-config
+        cat > /tmp/element-web-config/config.json <<EOF
         {
           "default_server_config": {
             "m.homeserver": {
@@ -233,7 +233,9 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      - SERVICE_URL_KETESA_80
+      # The image serves on 8080 (SERVER_PORT=8080; its own healthcheck probes
+      # localhost:8080/health), so the proxy must route the domain to 8080 - not 80.
+      - SERVICE_URL_KETESA_8080
     security_opt:
       - no-new-privileges:true
     depends_on:
