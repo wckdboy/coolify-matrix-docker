@@ -156,6 +156,12 @@ services:
     image: vectorim/element-web:v1.12.27
     restart: unless-stopped
     init: true
+    # The element-web image runs as USER nginx with a root-owned /app, so its own
+    # command cannot write /app/config.json ("can't create /app/config.json:
+    # Permission denied"). Running as root lets us generate the config at startup;
+    # nginx's master then drops the worker processes to the nginx user itself.
+    # (Alternative: mount a read-only config.json at /app/config.json and drop this.)
+    user: "0:0"
     environment:
       - SERVICE_URL_ELEMENT_80
       # The public Synapse URL, passed straight through. Deliberately NOT a
@@ -208,7 +214,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/config.json"]
       interval: 30s
       timeout: 5s
       retries: 5
