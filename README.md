@@ -112,13 +112,33 @@ Federation Tester after deployment.
 - Synapse secrets, signing keys, media, and PostgreSQL data live in named volumes.
 - **Back up both volumes.** A database-only backup is insufficient: the Synapse signing key
   lives in `synapse-data`, and losing it means losing the server's identity.
-- Image versions are pinned. Review upstream release notes and update deliberately rather
-  than following `latest` in production.
+- **Image policy: floating tags.** Synapse, Element and Ketesa track `latest`; PostgreSQL
+  floats within major 17 (`postgres:17-alpine`).
+  - Coolify does **not** re-pull floating tags on its own: after an upstream release, redeploy
+    with a fresh pull (Coolify's *Redeploy without cache*, or `docker compose pull` on the
+    host followed by a redeploy) to actually move versions.
+  - A Synapse update runs its own database migrations on the next boot, so the first start
+    after an update takes longer — that is what the 180 s healthcheck start period is for.
+  - PostgreSQL is deliberately **not** on `latest`: a major-version jump (18, 19, …) against an
+    existing data directory makes Postgres refuse to start and can cost you the homeserver
+    database. Move the major only together with a dump/restore or `pg_upgrade`.
+  - If an upstream release ever breaks the stack, pin that one image back to a specific tag
+    (e.g. `matrixdotorg/synapse:v1.160.0`) and redeploy.
 - Ketesa requires Synapse's authenticated admin API. Protect the Ketesa domain with Coolify
   access controls or another authentication layer, and do not share administrator access
   tokens.
 
 ## Revision history
+
+**2026-09-14 (floating image tags)**
+
+- Synapse, Element and Ketesa now track `latest` (user request); PostgreSQL floats within
+  major 17. Previously all four were pinned to exact versions.
+- Verified before switching: `matrixdotorg/synapse:latest` (a newer build than `v1.160.0`),
+  `vectorim/element-web:latest`, `ghcr.io/etkecc/ketesa:latest` and `postgres:17-alpine` all
+  exist and pull.
+- Because Coolify does not re-pull floating tags by itself, updating now requires an explicit
+  redeploy with a fresh pull; see the operations section.
 
 **2026-09-14 (Element fix + verified image facts)**
 

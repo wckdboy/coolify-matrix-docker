@@ -15,8 +15,13 @@ name: matrix
 #   (./scripts/...) fails when Coolify's deploy directory does not contain it.
 
 services:
+  # Image policy: floating tags (user request). Coolify does not re-pull by
+  # itself - after an upstream release, redeploy with a fresh pull to move
+  # (Coolify: "Redeploy" with force pull / "Redeploy without cache").
+  # A Synapse update runs its own database migrations on the next boot, which is
+  # why the healthcheck below allows a long start period.
   synapse:
-    image: matrixdotorg/synapse:v1.160.0
+    image: matrixdotorg/synapse:latest
     restart: unless-stopped
     init: true
     environment:
@@ -153,7 +158,7 @@ services:
         condition: service_healthy
 
   element:
-    image: vectorim/element-web:v1.12.27
+    image: vectorim/element-web:latest
     restart: unless-stopped
     init: true
     # The element-web image runs as USER nginx with a root-owned /app, so its own
@@ -224,7 +229,7 @@ services:
         condition: service_started
 
   ketesa:
-    image: ghcr.io/etkecc/ketesa:v1.5.0
+    image: ghcr.io/etkecc/ketesa:latest
     restart: unless-stopped
     init: true
     environment:
@@ -236,7 +241,11 @@ services:
         condition: service_started
 
   postgres:
-    image: postgres:17.6-alpine
+    # Floating within major 17 on purpose: a major version jump against an
+    # existing data directory makes Postgres refuse to start and can cost the
+    # homeserver database. Change to postgres:latest only together with a
+    # dump/restore or pg_upgrade.
+    image: postgres:17-alpine
     restart: unless-stopped
     shm_size: 256mb
     environment:
