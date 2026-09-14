@@ -38,7 +38,11 @@ services:
       - -c
       - |
         set -Eeuo pipefail
-        umask 077
+        # NOT 077: files created here are owned by root, and Synapse's image drops
+        # privileges to the synapse user (991:991) before starting the server.
+        # 0600 root-owned files make it die with:
+        #   PermissionError: [Errno 13] Permission denied: '/data/<server>.log.config'
+        umask 022
 
         # 1) Generate the base config. Idempotent: existing signing key,
         #    registration/macaroon secrets are reused from /data, never rotated.
@@ -120,6 +124,15 @@ services:
             cat /tmp/admin-create.log >&2
           fi
         }
+        # The image runs this entrypoint as root and then drops to the synapse user
+        # (991:991) for the server process, so everything under /data must be
+        # readable by it. This also repairs root-owned leftovers from earlier
+        # failed deployments, which is what produced the PermissionError.
+        if [ "$(id -u)" = "0" ]; then
+          chown -R 991:991 /data 2>/dev/null || true
+          chmod -R a+rX /data
+        fi
+
         create_initial_admin &
 
         exec /start.py

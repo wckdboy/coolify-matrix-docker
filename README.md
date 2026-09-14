@@ -58,6 +58,7 @@ baked into Synapse's config and Element's browser config at deploy time.
 | `Deployment failed: Command execution failed (exit code 1): ... docker compose ... up -d` | Look at the compose output **above** that line in the Coolify log — it is always one of the rows below | Read the first error line, do not guess |
 | `required variable SYNAPSE_PUBLIC_URL is missing a value` (exit 1) | The variable is required and not set in Coolify | Add `SYNAPSE_PUBLIC_URL=https://matrix.yourdomain.com` under Environment Variables and redeploy |
 | `dependency failed to start: container ... is unhealthy` | A container's healthcheck failed while `up -d` waited on it. First boot runs DB migrations, which can exceed a short healthcheck window | Fixed in this revision: Synapse gets `start_period: 180s` / `retries: 20`, and Element + Ketesa wait for `service_started` instead of `service_healthy` |
+| `PermissionError: [Errno 13] Permission denied: '/data/<server>.log.config'` (Synapse exits during initialisation) | The entrypoint created the config as **root** with a restrictive umask, then Synapse's image dropped privileges to the `synapse` user (991:991), which could not read root-owned `0600` files | Fixed in this revision: `umask 022` and an explicit `chown -R 991:991 /data` + `chmod -R a+rX /data` before the server starts (also repairs root-owned leftovers from earlier failed deploys) |
 | `pull access denied` / `manifest unknown` | The host could not pull an image | Confirm the pinned tags are reachable from the server (`docker pull ghcr.io/etkecc/ketesa:v1.5.0` on the host) |
 | `error while creating mount source path .../scripts/...` | Older revision mounted a repo file that Coolify's deploy directory did not contain | Not possible in this revision: the Synapse entrypoint is inline in the Compose file |
 | Containers run but the domains 502 / never get certificates | Custom Docker networks stopped Coolify's proxy from reaching the containers | Not possible in this revision: no custom networks are defined; every service joins Coolify's network and only the declared domains are exposed |
@@ -117,6 +118,17 @@ Federation Tester after deployment.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (permissions fix)**
+
+- `PermissionError: [Errno 13] Permission denied: '/data/doom.moe.log.config'` — Synapse's image
+  runs the entrypoint as **root**, then drops privileges to the `synapse` user (991:991) to run
+  the server. The entrypoint set `umask 077`, so the generated config files were root-owned and
+  mode `0600`: the unprivileged server process could not read them, and the container died during
+  initialisation.
+- Fix: `umask 022`, plus an explicit `chown -R 991:991 /data` and `chmod -R a+rX /data` before
+  `exec /start.py`. The recursive repair also cleans up root-owned leftovers from earlier failed
+  deployments, which is why it runs on every boot rather than only on a fresh volume.
 
 **2026-09-14 (deploy hardening)**
 
