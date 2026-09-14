@@ -131,8 +131,10 @@ services:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8008/health"]
       interval: 15s
       timeout: 5s
-      retries: 10
-      start_period: 60s
+      # First boot runs database migrations; a short window marks a healthy
+      # container unhealthy and makes 'compose up -d' exit 1.
+      retries: 20
+      start_period: 180s
     depends_on:
       postgres:
         condition: service_healthy
@@ -200,7 +202,7 @@ services:
       start_period: 15s
     depends_on:
       synapse:
-        condition: service_healthy
+        condition: service_started
 
   ketesa:
     image: ghcr.io/etkecc/ketesa:v1.5.0
@@ -212,7 +214,7 @@ services:
       - no-new-privileges:true
     depends_on:
       synapse:
-        condition: service_healthy
+        condition: service_started
 
   postgres:
     image: postgres:17.6-alpine

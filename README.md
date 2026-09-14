@@ -55,7 +55,10 @@ baked into Synapse's config and Element's browser config at deploy time.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `warning: The "SERVICE_URL_SYNAPSE_8008" variable is not set. Defaulting to a blank string.` | A cross-service reference to a Coolify URL/FQDN variable. Coolify populates `SERVICE_URL_*` / `SERVICE_FQDN_*` **only in the service that declares them**; password and username variables are global, URLs are not | Fixed in this revision: nothing references another service's URL variable. The public URL is passed as the plain `SYNAPSE_PUBLIC_URL` setting instead |
-| Coolify refuses to deploy: "required variable is empty" | `SYNAPSE_SERVER_NAME` or `SYNAPSE_PUBLIC_URL` not set | Set both (step 2). Coolify blocks deploys while a `:?` variable is empty — this is by design |
+| `Deployment failed: Command execution failed (exit code 1): ... docker compose ... up -d` | Look at the compose output **above** that line in the Coolify log — it is always one of the rows below | Read the first error line, do not guess |
+| `required variable SYNAPSE_PUBLIC_URL is missing a value` (exit 1) | The variable is required and not set in Coolify | Add `SYNAPSE_PUBLIC_URL=https://matrix.yourdomain.com` under Environment Variables and redeploy |
+| `dependency failed to start: container ... is unhealthy` | A container's healthcheck failed while `up -d` waited on it. First boot runs DB migrations, which can exceed a short healthcheck window | Fixed in this revision: Synapse gets `start_period: 180s` / `retries: 20`, and Element + Ketesa wait for `service_started` instead of `service_healthy` |
+| `pull access denied` / `manifest unknown` | The host could not pull an image | Confirm the pinned tags are reachable from the server (`docker pull ghcr.io/etkecc/ketesa:v1.5.0` on the host) |
 | `error while creating mount source path .../scripts/...` | Older revision mounted a repo file that Coolify's deploy directory did not contain | Not possible in this revision: the Synapse entrypoint is inline in the Compose file |
 | Containers run but the domains 502 / never get certificates | Custom Docker networks stopped Coolify's proxy from reaching the containers | Not possible in this revision: no custom networks are defined; every service joins Coolify's network and only the declared domains are exposed |
 | Element loads but says "can't connect to homeserver" | `base_url` is wrong or empty | `SYNAPSE_PUBLIC_URL` must be the public HTTPS URL with the scheme, e.g. `https://matrix.example.com`; if it is empty Element exits at start and says so |
@@ -114,6 +117,19 @@ Federation Tester after deployment.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (deploy hardening)**
+
+- Synapse's healthcheck window raised to `start_period: 180s`, `retries: 20`. The first boot
+  runs database migrations; a short window marks a healthy container unhealthy, and because
+  `docker compose up -d` waits on health conditions, that fails the whole deployment with
+  exit code 1.
+- Element and Ketesa now wait for `service_started` instead of `service_healthy`. They do not
+  need Synapse to be ready (they only render a config and start nginx), and gating them on
+  health made a slow Synapse fail the deployment.
+- Both failure modes above were reproduced locally against the exact command Coolify runs
+  (`docker compose --env-file ... --project-directory ... -f ... config/up -d`) before being
+  documented.
 
 **2026-09-14 (deploy warning fix)**
 
