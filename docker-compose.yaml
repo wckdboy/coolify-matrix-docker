@@ -1,28 +1,126 @@
 name: matrix
 
+# Coolify deployment notes
+# ------------------------
+# * Deploy as: New Resource -> Service -> Docker Compose from repository
+#   (this repo, compose location /docker-compose.yaml).
+# * Set SYNAPSE_SERVER_NAME BEFORE the first deploy: it is baked into every
+#   Matrix ID and cannot be changed afterwards.
+# * Assign the domains BEFORE the first deploy so the generated SERVICE_URL
+#   values are correct: synapse:8008, element:80, ketesa:80.
+# * No custom Docker networks are defined. Services share Coolify's network, so
+#   its proxy can route to them; nothing is published except the declared
+#   domains, and PostgreSQL has no ports at all (unreachable from outside).
+# * The Synapse entrypoint is inline on purpose: a bind mount of a repo file
+#   (./scripts/...) fails when Coolify's deploy directory does not contain it.
+
 services:
   synapse:
     image: matrixdotorg/synapse:v1.160.0
     restart: unless-stopped
     init: true
     environment:
-      SERVICE_URL_SYNAPSE_8008:
-      SYNAPSE_SERVER_NAME: ${SYNAPSE_SERVER_NAME:?Set the permanent Matrix server name}
-      SYNAPSE_REPORT_STATS: ${SYNAPSE_REPORT_STATS:-no}
-      ENABLE_REGISTRATION: ${ENABLE_REGISTRATION:-false}
-      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-50M}
-      POSTGRES_DB: ${POSTGRES_DB:-synapse}
-      POSTGRES_USER: ${SERVICE_LOWERCASEUSER_POSTGRES}
-      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_POSTGRES}
-      ADMIN_USER: ${SERVICE_LOWERCASEUSER_ADMIN}
-      ADMIN_PASSWORD: ${SERVICE_PASSWORD_64_ADMIN}
-      # Required for `register_new_matrix_user` (initial admin + Ketesa).
-      # Synapse's generated config omits it; the entrypoint writes it in.
-      SYNAPSE_REGISTRATION_SHARED_SECRET: ${SERVICE_BASE64_64_REGISTRATION}
+      - SERVICE_URL_SYNAPSE_8008
+      - SYNAPSE_SERVER_NAME=${SYNAPSE_SERVER_NAME:?Set the permanent Matrix server name}
+      - SYNAPSE_REPORT_STATS=${SYNAPSE_REPORT_STATS:-no}
+      - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-false}
+      - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-50M}
+      - POSTGRES_DB=${POSTGRES_DB:-synapse}
+      - POSTGRES_USER=${SERVICE_LOWERCASEUSER_POSTGRES}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_64_POSTGRES}
+      - ADMIN_USER=${SERVICE_LOWERCASEUSER_ADMIN}
+      - ADMIN_PASSWORD=${SERVICE_PASSWORD_64_ADMIN}
     volumes:
       - synapse-data:/data
-      - ./scripts/synapse-entrypoint.sh:/synapse-entrypoint.sh:ro
-    entrypoint: ["/bin/bash", "/synapse-entrypoint.sh"]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -Eeuo pipefail
+        umask 077
+
+        # 1) Generate the base config. Idempotent: existing signing key,
+        #    registration/macaroon secrets are reused from /data, never rotated.
+        /start.py generate
+
+        # 2) Apply the deployment's settings on EVERY boot (not just the first),
+        #    so ENABLE_REGISTRATION / MAX_UPLOAD_SIZE changes take effect and a
+        #    redeploy reproduces the same config.
+        python3 - <<'PY'
+        import os
+        from pathlib import Path
+
+        import yaml
+
+        path = Path("/data/homeserver.yaml")
+        config = yaml.safe_load(path.read_text())
+
+        public_url = (os.environ.get("SERVICE_URL_SYNAPSE")
+                      or os.environ.get("SERVICE_URL_SYNAPSE_8008", "")).rstrip("/") + "/"
+        registration_enabled = os.getenv("ENABLE_REGISTRATION", "false").lower() == "true"
+
+        config.update({
+            "public_baseurl": public_url,
+            "serve_server_wellknown": True,
+            "database": {
+                "name": "psycopg2",
+                "args": {
+                    "user": os.environ["POSTGRES_USER"],
+                    "password": os.environ["POSTGRES_PASSWORD"],
+                    "database": os.environ["POSTGRES_DB"],
+                    "host": "postgres",
+                    "port": 5432,
+                    "cp_min": 5,
+                    "cp_max": 10,
+                },
+            },
+            "enable_registration": registration_enabled,
+            "registration_requires_token": True,
+            "allow_public_rooms_without_auth": False,
+            "allow_public_rooms_over_federation": False,
+            "url_preview_enabled": False,
+            "max_upload_size": os.getenv("MAX_UPLOAD_SIZE", "50M"),
+            "federation_verify_certificates": True,
+        })
+
+        # /start.py generate writes registration_shared_secret from a value that
+        # persists in /data (or from SYNAPSE_REGISTRATION_SHARED_SECRET). Warn
+        # loudly if it is missing: the initial admin cannot be registered without it.
+        if not config.get("registration_shared_secret"):
+            print("[entrypoint] WARNING: registration_shared_secret missing; "
+                  "initial admin registration will fail", flush=True)
+
+        for listener in config.get("listeners", []):
+            if listener.get("type") == "http":
+                listener["x_forwarded"] = True
+                listener["bind_addresses"] = ["0.0.0.0"]
+                listener["resources"] = [{"names": ["client", "federation"], "compress": False}]
+
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        PY
+
+        # 3) Create the initial admin once Synapse is up (idempotent).
+        create_initial_admin() {
+          until curl --fail --silent http://127.0.0.1:8008/health >/dev/null; do
+            sleep 2
+          done
+          if register_new_matrix_user \
+              --admin \
+              --user "$$ADMIN_USER" \
+              --password "$$ADMIN_PASSWORD" \
+              --config /data/homeserver.yaml \
+              http://127.0.0.1:8008 >/tmp/admin-create.log 2>&1; then
+            echo "[entrypoint] initial admin '$$ADMIN_USER' created"
+          elif grep -qiE "already (taken|exists)" /tmp/admin-create.log; then
+            echo "[entrypoint] admin '$$ADMIN_USER' already exists"
+          else
+            echo "[entrypoint] WARNING: admin creation failed:" >&2
+            cat /tmp/admin-create.log >&2
+          fi
+        }
+        create_initial_admin &
+
+        exec /start.py
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
     security_opt:
@@ -32,21 +130,22 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - frontend
-      - backend
 
   element:
     image: vectorim/element-web:v1.12.27
     restart: unless-stopped
     init: true
     environment:
-      SERVICE_URL_ELEMENT_80:
-      SERVICE_URL_SYNAPSE_8008:
+      - SERVICE_URL_ELEMENT_80
+      # Primary value is the public Synapse URL; the fallback covers the case
+      # where only the port-suffixed variable is generated. Resolved at runtime
+      # inside the container, so a wrong/empty value cannot be baked in.
+      - SYNAPSE_URL_PRIMARY=${SERVICE_URL_SYNAPSE}
+      - SYNAPSE_URL_FALLBACK=${SERVICE_URL_SYNAPSE_8008}
     command:
       - /bin/sh
       - -ec
@@ -55,7 +154,7 @@ services:
         {
           "default_server_config": {
             "m.homeserver": {
-              "base_url": "$${SERVICE_URL_SYNAPSE_8008}"
+              "base_url": "$${SYNAPSE_URL_PRIMARY:-$${SYNAPSE_URL_FALLBACK}}"
             }
           },
           "disable_custom_urls": true,
@@ -95,22 +194,18 @@ services:
     depends_on:
       synapse:
         condition: service_healthy
-    networks:
-      - frontend
 
   ketesa:
     image: ghcr.io/etkecc/ketesa:v1.5.0
     restart: unless-stopped
     init: true
     environment:
-      SERVICE_URL_KETESA_80:
+      - SERVICE_URL_KETESA_80
     security_opt:
       - no-new-privileges:true
     depends_on:
       synapse:
         condition: service_healthy
-    networks:
-      - frontend
 
   postgres:
     image: postgres:17.6-alpine
@@ -134,14 +229,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
-    networks:
-      - backend
 
 volumes:
   synapse-data:
   postgres-data:
-
-networks:
-  frontend:
-  backend:
-    internal: true
