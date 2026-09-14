@@ -131,6 +131,25 @@ Federation Tester after deployment.
 
 ## Revision history
 
+**2026-09-14 (Element: the container command must hand over to the image entrypoint)**
+
+- The Element config path fix above was necessary but not sufficient. `vectorim/element-web`'s
+  entrypoint only runs its hooks (`/docker-entrypoint.d/*`) **when its first argument is
+  `nginx`**:
+  `if [ "$1" = "nginx" ] || [ "$1" = "nginx-debug" ]; then ... fi; exec "$@"`
+  A bare `command:` override replaces that argument, so the hooks are skipped and
+  `/etc/nginx/conf.d/default.conf` is never generated from `/etc/nginx/templates/`. That
+  template is the only place the `location /config` block exists, so nginx served the stock
+  config, `/config.json` returned 404, and the client could not load any configuration.
+- The container command now writes the config and then
+  `exec /docker-entrypoint.sh nginx -g "daemon off;"`, so the image's own startup path runs
+  (templates generated, `/app/config*.json` copied) and nginx is started with the stock CMD.
+- General rule for this stack: **never override an image's CMD without running its entrypoint
+  explicitly.** Check `Entrypoint`/`Cmd` in the image config first.
+- The Element healthcheck probes `/config.json`, which is exactly the file the `/config`
+  location serves — so if the location is missing again, the container reports unhealthy
+  instead of silently serving a broken client.
+
 **2026-09-14 (Element config path + Ketesa port — both found in the images, not guessed)**
 
 - **Element**: its nginx template serves the runtime config from

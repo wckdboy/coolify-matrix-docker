@@ -203,7 +203,15 @@ services:
           }
         }
         EOF
-        exec nginx -g 'daemon off;'
+        # Hand over to the image's own entrypoint. It runs /docker-entrypoint.d/*,
+        # which generates /etc/nginx/conf.d/default.conf from /etc/nginx/templates/
+        # and copies /app/config*.json into /tmp/element-web-config/. That template is
+        # the ONLY place the `location /config` block exists: starting nginx directly
+        # (as a bare command override does) leaves the stock nginx config in place,
+        # /config.json 404s, and the client cannot load its configuration at all.
+        # The entrypoint only runs those hooks when its first argument is `nginx`,
+        # so it must be invoked explicitly.
+        exec /docker-entrypoint.sh nginx -g "daemon off;"
     tmpfs:
       - /var/cache/nginx:rw,noexec,nosuid,size=32m
       - /var/run:rw,noexec,nosuid,size=1m
