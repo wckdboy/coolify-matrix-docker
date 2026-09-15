@@ -32,6 +32,7 @@ services:
       - SYNAPSE_REPORT_STATS=${SYNAPSE_REPORT_STATS:-no}
       - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-false}
       - ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=${ALLOW_PUBLIC_ROOMS_OVER_FEDERATION:-false}
+      - ALLOW_ROOM_PUBLISHING=${ALLOW_ROOM_PUBLISHING:-true}
       - ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH=${ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH:-false}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-50M}
       - POSTGRES_DB=${POSTGRES_DB:-synapse}
@@ -117,6 +118,18 @@ services:
                 listener["x_forwarded"] = True
                 listener["bind_addresses"] = ["0.0.0.0"]
                 listener["resources"] = [{"names": ["client", "federation"], "compress": False}]
+
+        # Publishing a room to the public directory is DENIED by default: with no
+        # room_list_publication_rules, RoomDirectoryConfig.is_publishing_room_allowed()
+        # loops over an empty list and returns False. The allow_public_rooms_* flags
+        # govern *viewing* the directory, not adding to it, which is why publishing
+        # still fails with both of them on. (alias_creation_rules defaults the other
+        # way: allow-all when unset.) Set ALLOW_ROOM_PUBLISHING=false to keep Synapse's
+        # default of only admins-with-rules being able to publish.
+        if as_bool("ALLOW_ROOM_PUBLISHING", "true"):
+            config["room_list_publication_rules"] = [
+                {"user_id": "*", "alias": "*", "room_id": "*", "action": "allow"},
+            ]
 
         path.write_text(yaml.safe_dump(config, sort_keys=False))
         PY

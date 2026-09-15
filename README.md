@@ -27,6 +27,9 @@ baked into Synapse's config and Element's browser config at deploy time.
      at. It must be an absolute URL with the scheme and no trailing slash.
    - `SYNAPSE_REPORT_STATS` — `no` (default)
    - `ENABLE_REGISTRATION` — `false` (default)
+   - `ALLOW_ROOM_PUBLISHING` — `true` (default). Writes an explicit allow-all
+     `room_list_publication_rules`, without which Synapse refuses to publish any room to
+     the directory. Set `false` to restore the deny-by-default.
    - `ALLOW_PUBLIC_ROOMS_OVER_FEDERATION` — `false` (default). Set `true` to publish
      your public room directory to **other servers** (so people on other homeservers
      can discover your public rooms). Requires working federation.
@@ -152,10 +155,22 @@ Four separate switches, which are easy to conflate:
 
 | Want | Setting | How |
 |---|---|---|
-| Other servers can see your public room directory | `allow_public_rooms_over_federation: true` | env `ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=true` in Coolify, then redeploy |
+| **Publish a room** to the public directory | `room_list_publication_rules` | env `ALLOW_ROOM_PUBLISHING=true` (**default here**). Synapse **denies** this when the key is absent — see below |
+| Other servers can see your public room directory | `allow_public_rooms_over_federation: true` | env `ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=true`, then redeploy |
 | Anonymous clients can list your public rooms | `allow_public_rooms_without_auth: true` | env `ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH=true`, then redeploy |
-| Make a room publicly joinable | per-room | room **Settings → Visibility: Public**, and publish it to the directory |
-| Appear in the global directory at matrix.org | opt-in | requires federation working **and** listing the room from your admin UI |
+| Make a room publicly joinable | per-room | room **Settings → Visibility: Public** |
+| Appear in the global directory at matrix.org | opt-in | requires federation working **and** the room published |
+
+**Why publishing needs its own switch.** `room_list_publication_rules` has an unusual
+default: when the key is absent, Synapse's `RoomDirectoryConfig` ends up with an *empty*
+rule list and `is_publishing_room_allowed()` returns `False` — so **no room can be
+published at all**, no matter what the two `allow_public_rooms_*` flags say (they govern
+*reading* the directory). `alias_creation_rules` behaves the other way round: unset means
+allow-all. This stack therefore writes an explicit allow-all publication rule by default;
+set `ALLOW_ROOM_PUBLISHING=false` to go back to Synapse's deny-by-default. To narrow it
+instead, replace the rule with one pinned to specific users, e.g.
+`{"user_id": "@admin:example.com", "alias": "*", "room_id": "*", "action": "allow"}` —
+the rules are matched in order and the first match wins.
 
 The two `allow_*` values are read from the environment on **every boot** (like
 `ENABLE_REGISTRATION`), so changing them in Coolify only needs a redeploy — no config
@@ -204,6 +219,16 @@ that is not an error.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (room publishing was denied by Synapse's default)**
+
+- Publishing a room to the directory failed with "not allowed" even with both
+  `allow_public_rooms_*` flags on. Cause, source-verified: with no
+  `room_list_publication_rules`, Synapse keeps an empty rule list and
+  `is_publishing_room_allowed()` returns `False` — the flags control *reading* the
+  directory, the rules control *writing* to it. The entrypoint now writes an explicit
+  allow-all publication rule by default (`ALLOW_ROOM_PUBLISHING=true`), and the README
+  explains the three switches and how to narrow the rule to specific users.
 
 **2026-09-14 (public rooms over federation, env-driven)**
 
