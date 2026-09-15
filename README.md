@@ -27,6 +27,11 @@ baked into Synapse's config and Element's browser config at deploy time.
      at. It must be an absolute URL with the scheme and no trailing slash.
    - `SYNAPSE_REPORT_STATS` — `no` (default)
    - `ENABLE_REGISTRATION` — `false` (default)
+   - `ALLOW_PUBLIC_ROOMS_OVER_FEDERATION` — `false` (default). Set `true` to publish
+     your public room directory to **other servers** (so people on other homeservers
+     can discover your public rooms). Requires working federation.
+   - `ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH` — `false` (default). Set `true` to let anyone
+     list your public rooms from a client **without logging in** first.
    - `MAX_UPLOAD_SIZE` — `50M` (default)
    - `POSTGRES_DB` — `synapse` (default)
 3. **Assign the domains** (Configuration → General → component cards, or *Domains*):
@@ -141,6 +146,32 @@ that hostname is not the server name and its `.well-known` is intentionally not 
 A passing report shows the resolved version, the key response for `example.com`, no errors,
 and the resource list as `valid`.
 
+### Public rooms and the room directory
+
+Four separate switches, which are easy to conflate:
+
+| Want | Setting | How |
+|---|---|---|
+| Other servers can see your public room directory | `allow_public_rooms_over_federation: true` | env `ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=true` in Coolify, then redeploy |
+| Anonymous clients can list your public rooms | `allow_public_rooms_without_auth: true` | env `ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH=true`, then redeploy |
+| Make a room publicly joinable | per-room | room **Settings → Visibility: Public**, and publish it to the directory |
+| Appear in the global directory at matrix.org | opt-in | requires federation working **and** listing the room from your admin UI |
+
+The two `allow_*` values are read from the environment on **every boot** (like
+`ENABLE_REGISTRATION`), so changing them in Coolify only needs a redeploy — no config
+editing, and no hand-editing of `/data/homeserver.yaml`, which is regenerated.
+
+Verify after a redeploy:
+
+```
+curl -s https://matrix.example.com/_matrix/client/v3/publicRooms | head -c 200   # client-side view
+curl -s https://matrix.example.com/_matrix/federation/v1/publicRooms | head -c 200   # federated view
+```
+
+A `403 M_FORBIDDEN` on the federation endpoint means the flag is still off; a JSON body
+with `chunk`/`total_room_count_estimate` means it is live. Note that an enabled flag on a
+server with no published public rooms still returns an empty list — that is not an error.
+
 ## Security and operations
 
 - PostgreSQL is not published: it has no ports and is only reachable from the other
@@ -168,6 +199,16 @@ and the resource list as `valid`.
   tokens.
 
 ## Revision history
+
+**2026-09-14 (public rooms over federation, env-driven)**
+
+- `allow_public_rooms_over_federation` and `allow_public_rooms_without_auth` are no longer
+  hardcoded off: both are read from the environment on every boot, so they can be flipped
+  from Coolify's Environment Variables (`ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=true` /
+  `ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH=true`) with a redeploy. Defaults stay `false`.
+- README: the env checklist plus a "Public rooms and the room directory" section that
+  separates the four things people conflate (federated directory, anonymous listing,
+  making a room public, the global matrix.org directory) and gives the verification curls.
 
 **2026-09-14 (federation delegation: the `wellknown` service)**
 

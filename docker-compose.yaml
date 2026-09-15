@@ -31,6 +31,8 @@ services:
       - SYNAPSE_PUBLIC_URL=${SYNAPSE_PUBLIC_URL:?Set the public HTTPS URL of Synapse, e.g. https://matrix.example.com}
       - SYNAPSE_REPORT_STATS=${SYNAPSE_REPORT_STATS:-no}
       - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-false}
+      - ALLOW_PUBLIC_ROOMS_OVER_FEDERATION=${ALLOW_PUBLIC_ROOMS_OVER_FEDERATION:-false}
+      - ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH=${ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH:-false}
       - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-50M}
       - POSTGRES_DB=${POSTGRES_DB:-synapse}
       - POSTGRES_USER=${SERVICE_LOWERCASEUSER_POSTGRES}
@@ -69,7 +71,10 @@ services:
         public_url = (os.environ.get("SYNAPSE_PUBLIC_URL")
                       or os.environ.get("SERVICE_URL_SYNAPSE")
                       or os.environ.get("SERVICE_URL_SYNAPSE_8008", "")).rstrip("/") + "/"
-        registration_enabled = os.getenv("ENABLE_REGISTRATION", "false").lower() == "true"
+        def as_bool(name, default="false"):
+            return os.getenv(name, default).strip().lower() == "true"
+
+        registration_enabled = as_bool("ENABLE_REGISTRATION")
 
         config.update({
             "public_baseurl": public_url,
@@ -93,8 +98,8 @@ services:
             },
             "enable_registration": registration_enabled,
             "registration_requires_token": True,
-            "allow_public_rooms_without_auth": False,
-            "allow_public_rooms_over_federation": False,
+            "allow_public_rooms_without_auth": as_bool("ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH"),
+            "allow_public_rooms_over_federation": as_bool("ALLOW_PUBLIC_ROOMS_OVER_FEDERATION"),
             "url_preview_enabled": False,
             "max_upload_size": os.getenv("MAX_UPLOAD_SIZE", "50M"),
             "federation_verify_certificates": True,
