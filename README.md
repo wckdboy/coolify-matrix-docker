@@ -164,13 +164,18 @@ editing, and no hand-editing of `/data/homeserver.yaml`, which is regenerated.
 Verify after a redeploy:
 
 ```
-curl -s https://matrix.example.com/_matrix/client/v3/publicRooms | head -c 200   # client-side view
-curl -s https://matrix.example.com/_matrix/federation/v1/publicRooms | head -c 200   # federated view
+# client side — anonymous listing (reflects ALLOW_PUBLIC_ROOMS_WITHOUT_AUTH)
+curl -s -o /dev/null -w '%{http_code}\n' https://matrix.example.com/_matrix/client/v3/publicRooms
+#   401 M_MISSING_TOKEN = auth required (flag false) · 200 + {"chunk":[...]} = live
+
+# the federated flag itself (checked on the server, since the federation endpoint
+# requires a signed request — a bare curl returns 401 regardless of the setting)
+docker exec <synapse-container> grep allow_public_rooms /data/homeserver.yaml
+#   allow_public_rooms_over_federation: true  = live
 ```
 
-A `403 M_FORBIDDEN` on the federation endpoint means the flag is still off; a JSON body
-with `chunk`/`total_room_count_estimate` means it is live. Note that an enabled flag on a
-server with no published public rooms still returns an empty list — that is not an error.
+An enabled flag on a server with no published public rooms still returns an empty list —
+that is not an error.
 
 ## Security and operations
 
